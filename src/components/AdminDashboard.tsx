@@ -8,11 +8,49 @@ import {
   Printer
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { APIProvider, Map as GoogleMap, AdvancedMarker, Pin } from '@vis.gl/react-google-maps';
+import { APIProvider, Map as GoogleMap, AdvancedMarker, Pin, useMap } from '@vis.gl/react-google-maps';
 import { UserProfile, Driver, TripReport, LocationLog } from '../types';
 import { fetchApi } from '../lib/api';
 import { isDriverOnline, getActiveReports } from '../lib/statusHelper';
 import { subscribeToDrivers, subscribeToTripReports } from '../lib/firebaseClient';
+
+// Helper component to auto-fit Google Map bounds dynamically for all active markers
+function MapBoundsFitter({ points }: { points: { lat: number; lng: number }[] }) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!map || points.length === 0 || typeof google === 'undefined') return;
+
+    const bounds = new google.maps.LatLngBounds();
+    points.forEach((pt) => {
+      if (typeof pt.lat === 'number' && typeof pt.lng === 'number' && !isNaN(pt.lat) && !isNaN(pt.lng)) {
+        bounds.extend(pt);
+      }
+    });
+
+    const northEast = bounds.getNorthEast();
+    const southWest = bounds.getSouthWest();
+    if (!northEast || !southWest) return;
+
+    const latDiff = Math.abs(northEast.lat() - southWest.lat());
+    const lngDiff = Math.abs(northEast.lng() - southWest.lng());
+
+    // Center and set a nice zoom level if points are too close together
+    if (latDiff < 0.0015 && lngDiff < 0.0015) {
+      map.setCenter(points[0]);
+      map.setZoom(14);
+    } else {
+      map.fitBounds(bounds, {
+        top: 60,
+        right: 60,
+        bottom: 60,
+        left: 60
+      });
+    }
+  }, [map, JSON.stringify(points)]);
+
+  return null;
+}
 
 interface AdminDashboardProps {
   user: UserProfile;
@@ -601,6 +639,46 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       d.vehiclePlate.toLowerCase().includes(mapSearchQuery.toLowerCase())
     );
 
+    // Apply smart circular/spiral offset for drivers with identical or very close coordinates
+    const displayedDrivers = searchedActiveDrivers.map((driver, index) => {
+      const lat = driver.lastLatitude ?? 30.2672;
+      const lng = driver.lastLongitude ?? -97.7431;
+      
+      // Calculate how many preceding drivers share almost the exact same position
+      let overlapCount = 0;
+      for (let i = 0; i < index; i++) {
+        const prevDriver = searchedActiveDrivers[i];
+        const prevLat = prevDriver.lastLatitude ?? 30.2672;
+        const prevLng = prevDriver.lastLongitude ?? -97.7431;
+        
+        const latDiff = Math.abs(lat - prevLat);
+        const lngDiff = Math.abs(lng - prevLng);
+        if (latDiff < 0.00015 && lngDiff < 0.00015) {
+          overlapCount++;
+        }
+      }
+      
+      if (overlapCount === 0) {
+        return {
+          ...driver,
+          displayLat: lat,
+          displayLng: lng
+        };
+      }
+      
+      // Distribute overlapping markers in a neat spiral or circle
+      const angle = (overlapCount * 2 * Math.PI) / 6; // support up to 6 markers per concentric ring
+      const radius = 0.00025 * Math.ceil(overlapCount / 6); // roughly 25 meters per layer
+      const displayLat = lat + Math.sin(angle) * radius;
+      const displayLng = lng + Math.cos(angle) * radius;
+      
+      return {
+        ...driver,
+        displayLat,
+        displayLng
+      };
+    });
+
     // SVG Map Fallback Projection calculations
     const svgWidth = 380;
     const svgHeight = 280;
@@ -626,11 +704,11 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       return { x: 190, y: 140 }; // center default
     };
 
-    if (searchedActiveDrivers.length > 0) {
-      let minLat = Math.min(...searchedActiveDrivers.map(d => d.lastLatitude ?? 30.2672));
-      let maxLat = Math.max(...searchedActiveDrivers.map(d => d.lastLatitude ?? 30.2672));
-      let minLng = Math.min(...searchedActiveDrivers.map(d => d.lastLongitude ?? -97.7431));
-      let maxLng = Math.max(...searchedActiveDrivers.map(d => d.lastLongitude ?? -97.7431));
+    if (displayedDrivers.length > 0) {
+      let minLat = Math.min(...displayedDrivers.map(d => d.displayLat));
+      let maxLat = Math.max(...displayedDrivers.map(d => d.displayLat));
+      let minLng = Math.min(...displayedDrivers.map(d => d.displayLng));
+      let maxLng = Math.max(...displayedDrivers.map(d => d.displayLng));
 
       const padding = 0.005;
       if (maxLat - minLat < 0.0001) {
@@ -702,15 +780,15 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
               <div className="w-full h-full">
                 <GoogleMap
                   mapId="dn_gps_tracker_map"
-                  defaultCenter={{ lat: searchedActiveDrivers[0]?.lastLatitude ?? 30.2672, lng: searchedActiveDrivers[0]?.lastLongitude ?? -97.7431 }}
+                  defaultCenter={{ lat: displayedDrivers[0]?.displayLat ?? 30.2672, lng: displayedDrivers[0]?.displayLng ?? -97.7431 }}
                   defaultZoom={12}
                   gestureHandling={'greedy'}
                   disableDefaultUI={true}
                 >
-                  {searchedActiveDrivers.map((driver) => (
+                  {displayedDrivers.map((driver) => (
                     <AdvancedMarker
                       key={driver.id}
-                      position={{ lat: driver.lastLatitude ?? 30.2672, lng: driver.lastLongitude ?? -97.7431 }}
+                      position={{ lat: driver.displayLat, lng: driver.displayLng }}
                       onClick={() => !isPreview && setSelectedDriver(driver)}
                     >
                       <Pin
@@ -720,6 +798,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                       />
                     </AdvancedMarker>
                   ))}
+                  <MapBoundsFitter points={displayedDrivers.map(d => ({ lat: d.displayLat, lng: d.displayLng }))} />
                 </GoogleMap>
               </div>
             </APIProvider>
@@ -733,7 +812,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                 <span>FLEET VECTOR MAP ACTIVE</span>
               </div>
 
-              {searchedActiveDrivers.length === 0 ? (
+              {displayedDrivers.length === 0 ? (
                 <div className="flex-1 flex flex-col items-center justify-center p-6 text-center z-10 relative">
                   <svg className="absolute inset-0 w-full h-full p-2" viewBox="0 0 380 280">
                     {backgroundMap}
@@ -757,8 +836,8 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                     <line x1="0" y1="0" x2="380" y2="280" stroke="#3b82f6" strokeWidth="0.5" className="animate-[pulse_2s_infinite] opacity-30" />
 
                     {/* Render Driver Trails / Pins */}
-                    {searchedActiveDrivers.map((driver) => {
-                      const { x, y } = project(driver.lastLatitude ?? 30.2672, driver.lastLongitude ?? -97.7431);
+                    {displayedDrivers.map((driver) => {
+                      const { x, y } = project(driver.displayLat, driver.displayLng);
                       const isSelected = driver.id === selectedDriver?.id;
                       return (
                         <g 
