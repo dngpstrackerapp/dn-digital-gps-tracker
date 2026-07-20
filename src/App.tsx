@@ -12,6 +12,7 @@ type ScreenState = 'splash' | 'login' | 'admin' | 'driver';
 export default function App() {
   const [screen, setScreen] = useState<ScreenState>('splash');
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [loginMessage, setLoginMessage] = useState<string | null>(null);
 
   // Load session from localStorage on startup and refresh/verify from Firestore
   useEffect(() => {
@@ -33,6 +34,7 @@ export default function App() {
               setUser(null);
               localStorage.clear();
               sessionStorage.clear();
+              setLoginMessage("Your account has been removed by the administrator.");
               setScreen('login');
             }
           })
@@ -57,6 +59,7 @@ export default function App() {
   const handleLoginSuccess = (loggedInUser: UserProfile) => {
     localStorage.clear();
     sessionStorage.clear();
+    setLoginMessage(null);
     setUser(loggedInUser);
     localStorage.setItem('dn_gps_session_user', JSON.stringify(loggedInUser));
     setScreen(loggedInUser.role === 'admin' ? 'admin' : 'driver');
@@ -66,6 +69,7 @@ export default function App() {
     setUser(null);
     localStorage.clear();
     sessionStorage.clear();
+    setLoginMessage(null);
     setScreen('login');
   };
 
@@ -79,7 +83,7 @@ export default function App() {
         <SplashScreen onComplete={handleSplashComplete} />
       )}
       {screen === 'login' && (
-        <LoginScreen onLoginSuccess={handleLoginSuccess} />
+        <LoginScreen onLoginSuccess={handleLoginSuccess} message={loginMessage} />
       )}
       {screen === 'admin' && user && (
         <AdminDashboard user={user} onLogout={handleLogout} />
@@ -88,6 +92,13 @@ export default function App() {
         <DriverDashboard 
           user={user} 
           onLogout={handleLogout} 
+          onForceLogout={(msg) => {
+            setUser(null);
+            localStorage.clear();
+            sessionStorage.clear();
+            setLoginMessage(msg || "Your account has been removed by the administrator.");
+            setScreen('login');
+          }}
           onProfileUpdate={(updatedUser) => {
             setUser(updatedUser);
             localStorage.setItem('dn_gps_session_user', JSON.stringify(updatedUser));

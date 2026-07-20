@@ -11,6 +11,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { APIProvider, Map as GoogleMap, AdvancedMarker, Pin } from '@vis.gl/react-google-maps';
 import { UserProfile, Driver, TripReport, LocationLog } from '../types';
 import { fetchApi } from '../lib/api';
+import { isDriverOnline, getActiveReports } from '../lib/statusHelper';
+import { subscribeToDrivers, subscribeToTripReports } from '../lib/firebaseClient';
 
 interface AdminDashboardProps {
   user: UserProfile;
@@ -37,7 +39,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const [newDriverLicenseNumber, setNewDriverLicenseNumber] = useState('');
   const [newDriverLicenseExpiry, setNewDriverLicenseExpiry] = useState('');
   const [newDriverEmergencyContact, setNewDriverEmergencyContact] = useState('');
-  const [newDriverStatus, setNewDriverStatus] = useState<'active' | 'inactive' | 'offline'>('offline');
   const [addError, setAddError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -47,7 +48,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const [editDriverName, setEditDriverName] = useState('');
   const [editDriverPlate, setEditDriverPlate] = useState('');
   const [editDriverPhone, setEditDriverPhone] = useState('');
-  const [editDriverStatus, setEditDriverStatus] = useState<'active' | 'inactive' | 'offline'>('offline');
   const [editDriverDob, setEditDriverDob] = useState('');
   const [editDriverEmail, setEditDriverEmail] = useState('');
   const [editDriverPassword, setEditDriverPassword] = useState('');
@@ -94,31 +94,38 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
   const [pingInterval, setPingInterval] = useState('10');
   const [speedLimit, setSpeedLimit] = useState('100');
 
-  // Load Data
-  const fetchData = async () => {
-    try {
-      const driversRes = await fetchApi('/api/drivers');
-      const driversData = await driversRes.json();
-      setDrivers(driversData);
-
-      const reportsRes = await fetchApi('/api/reports');
-      const reportsData = await reportsRes.json();
-      setReports(reportsData);
-    } catch (err) {
-      console.error('Error fetching data:', err);
-    }
-  };
-
+  // Real-time Firestore subscriptions for drivers and reports
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 4000); // Poll every 4s for real-time live map updates
-    return () => clearInterval(interval);
+    console.log('[AdminDashboard] Initiating real-time snapshot listeners for drivers and reports...');
+    const unsubscribeDrivers = subscribeToDrivers((driversData) => {
+      setDrivers(driversData);
+    });
+
+    const unsubscribeReports = subscribeToTripReports((reportsData) => {
+      setReports(reportsData);
+    });
+
+    return () => {
+      console.log('[AdminDashboard] Unsubscribing real-time listeners...');
+      unsubscribeDrivers();
+      unsubscribeReports();
+    };
   }, []);
 
   // Derive active driver IDs from ongoing trip reports as the single source of truth
-  const activeDriverIds = new Set(
-    reports.filter(r => r.status === 'ongoing').map(r => r.driverId)
-  );
+  const activeDriverIds = new Set<string>();
+  getActiveReports(reports).forEach(r => {
+    const matchingDriver = drivers.find(d => 
+      d.id === r.driverId || 
+      (d.email && r.driverId && d.email.toLowerCase() === r.driverId.toLowerCase()) ||
+      (d.name && d.name.toLowerCase() === r.driverName.toLowerCase())
+    );
+    if (matchingDriver) {
+      activeDriverIds.add(matchingDriver.id);
+    } else {
+      activeDriverIds.add(r.driverId);
+    }
+  });
 
   const handleAddDriver = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -147,8 +154,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
           vehicleNameType: newDriverVehicleName,
           licenseNumber: newDriverLicenseNumber,
           licenseExpiry: newDriverLicenseExpiry,
-          emergencyContact: newDriverEmergencyContact,
-          status: newDriverStatus
+          emergencyContact: newDriverEmergencyContact
         })
       });
 
@@ -168,9 +174,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       setNewDriverLicenseNumber('');
       setNewDriverLicenseExpiry('');
       setNewDriverEmergencyContact('');
-      setNewDriverStatus('offline');
       setShowAddModal(false);
-      fetchData();
     } catch (err: any) {
       setAddError(err.message || 'Error occurred');
     } finally {
@@ -215,7 +219,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       setShowEditModal(false);
       setEditingDriver(null);
       setEditDriverPassword('');
-      fetchData();
     } catch (err: any) {
       setEditError(err.message || 'Error occurred');
     } finally {
@@ -240,7 +243,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
       if (!res.ok) throw new Error(data.error || 'Failed to delete driver');
       
       setDriverToDelete(null);
-      fetchData();
     } catch (err: any) {
       setDeleteError(err.message || 'Error deleting driver');
     } finally {
@@ -590,8 +592,8 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     const googleMapsApiKey = process.env.GOOGLE_MAPS_PLATFORM_KEY || '';
     const hasGoogleMapsKey = googleMapsApiKey && googleMapsApiKey !== 'YOUR_GOOGLE_MAPS_API_KEY' && googleMapsApiKey.trim() !== '';
 
-    // Filter drivers that have GPS data and are active (ongoing trip report)
-    const activeDrivers = drivers.filter(d => activeDriverIds.has(d.id) && d.lastLatitude !== null && d.lastLongitude !== null);
+    // Filter drivers that are active (ongoing trip report)
+    const activeDrivers = drivers.filter(d => activeDriverIds.has(d.id));
     
     // Filter active drivers based on map search query
     const searchedActiveDrivers = activeDrivers.filter(d => 
@@ -625,10 +627,10 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
     };
 
     if (searchedActiveDrivers.length > 0) {
-      let minLat = Math.min(...searchedActiveDrivers.map(d => d.lastLatitude!));
-      let maxLat = Math.max(...searchedActiveDrivers.map(d => d.lastLatitude!));
-      let minLng = Math.min(...searchedActiveDrivers.map(d => d.lastLongitude!));
-      let maxLng = Math.max(...searchedActiveDrivers.map(d => d.lastLongitude!));
+      let minLat = Math.min(...searchedActiveDrivers.map(d => d.lastLatitude ?? 30.2672));
+      let maxLat = Math.max(...searchedActiveDrivers.map(d => d.lastLatitude ?? 30.2672));
+      let minLng = Math.min(...searchedActiveDrivers.map(d => d.lastLongitude ?? -97.7431));
+      let maxLng = Math.max(...searchedActiveDrivers.map(d => d.lastLongitude ?? -97.7431));
 
       const padding = 0.005;
       if (maxLat - minLat < 0.0001) {
@@ -700,7 +702,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
               <div className="w-full h-full">
                 <GoogleMap
                   mapId="dn_gps_tracker_map"
-                  defaultCenter={{ lat: searchedActiveDrivers[0]?.lastLatitude !== null ? searchedActiveDrivers[0].lastLatitude! : 30.2672, lng: searchedActiveDrivers[0]?.lastLongitude !== null ? searchedActiveDrivers[0].lastLongitude! : -97.7431 }}
+                  defaultCenter={{ lat: searchedActiveDrivers[0]?.lastLatitude ?? 30.2672, lng: searchedActiveDrivers[0]?.lastLongitude ?? -97.7431 }}
                   defaultZoom={12}
                   gestureHandling={'greedy'}
                   disableDefaultUI={true}
@@ -708,7 +710,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                   {searchedActiveDrivers.map((driver) => (
                     <AdvancedMarker
                       key={driver.id}
-                      position={{ lat: driver.lastLatitude!, lng: driver.lastLongitude! }}
+                      position={{ lat: driver.lastLatitude ?? 30.2672, lng: driver.lastLongitude ?? -97.7431 }}
                       onClick={() => !isPreview && setSelectedDriver(driver)}
                     >
                       <Pin
@@ -756,7 +758,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
 
                     {/* Render Driver Trails / Pins */}
                     {searchedActiveDrivers.map((driver) => {
-                      const { x, y } = project(driver.lastLatitude!, driver.lastLongitude!);
+                      const { x, y } = project(driver.lastLatitude ?? 30.2672, driver.lastLongitude ?? -97.7431);
                       const isSelected = driver.id === selectedDriver?.id;
                       return (
                         <g 
@@ -961,9 +963,9 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                 </span>
                 <div className="flex items-center gap-2">
                   <span className="text-2xl font-extrabold text-slate-800">
-                    {reports.filter(r => r.status === 'ongoing').length}
+                    {getActiveReports(reports).length}
                   </span>
-                  {reports.filter(r => r.status === 'ongoing').length > 0 && (
+                  {getActiveReports(reports).length > 0 && (
                     <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping"></span>
                   )}
                 </div>
@@ -1010,7 +1012,7 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                 <div className="flex items-center gap-1.5">
                   <Users size={12} className="text-slate-500" />
                   <span className="font-semibold text-slate-600">
-                    Active Drivers: <strong className="text-slate-800">{reports.filter(r => r.status === 'ongoing').length}</strong>
+                    Active Drivers: <strong className="text-slate-800">{getActiveReports(reports).length}</strong>
                   </span>
                 </div>
                 <div className="flex items-center gap-1.5 font-mono">
@@ -1085,18 +1087,18 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                 Live Transmitting Terminals
               </h4>
 
-              {drivers.filter(d => activeDriverIds.has(d.id) && d.lastLatitude).length === 0 ? (
+              {drivers.filter(d => activeDriverIds.has(d.id)).length === 0 ? (
                 <div className="text-center py-4 text-slate-400 text-xs">
                   No terminals actively broadcasting GPS coordinates.
                 </div>
               ) : (
                 <div className="space-y-2.5">
-                  {drivers.filter(d => activeDriverIds.has(d.id) && d.lastLatitude).map(driver => (
+                  {drivers.filter(d => activeDriverIds.has(d.id)).map(driver => (
                     <div key={driver.id} className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex items-center justify-between">
                       <div>
                         <p className="text-xs font-bold text-slate-800">{driver.name}</p>
                         <p className="text-[9px] text-slate-400 font-mono">
-                          Lat: {driver.lastLatitude?.toFixed(5)} • Lng: {driver.lastLongitude?.toFixed(5)}
+                          {driver.lastLatitude ? `Lat: ${driver.lastLatitude.toFixed(5)} • Lng: ${driver.lastLongitude?.toFixed(5)}` : 'Locating (GPS Initializing)...'}
                         </p>
                       </div>
                       <div className="text-right">
@@ -1164,7 +1166,6 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                             setEditDriverName(driver.name);
                             setEditDriverPlate(driver.vehiclePlate);
                             setEditDriverPhone(driver.phone || '');
-                            setEditDriverStatus(driver.status || 'offline');
                             setEditDriverDob(driver.dob || '');
                             setEditDriverEmail(driver.email || '');
                             setEditDriverPassword(driver.password || '');
@@ -1205,7 +1206,11 @@ export default function AdminDashboard({ user, onLogout }: AdminDashboardProps) 
                       <div className="flex items-center gap-1.5 text-slate-500 justify-end">
                         <Compass size={12} className="text-slate-400" />
                         <span className="font-mono">
-                          {driver.lastLatitude ? `${driver.lastLatitude.toFixed(3)}, ${driver.lastLongitude?.toFixed(3)}` : 'No Signal'}
+                          {driver.lastLatitude 
+                            ? `${driver.lastLatitude.toFixed(3)}, ${driver.lastLongitude?.toFixed(3)}` 
+                            : activeDriverIds.has(driver.id) 
+                              ? 'Locating...' 
+                              : 'No Signal'}
                         </span>
                       </div>
                     </div>

@@ -6,14 +6,21 @@ import { fetchApi } from '../lib/api';
 
 interface LoginScreenProps {
   onLoginSuccess: (user: UserProfile) => void;
+  message?: string | null;
 }
 
-export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
+export default function LoginScreen({ onLoginSuccess, message }: LoginScreenProps) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(message || null);
   const [isLoading, setIsLoading] = useState(false);
+
+  React.useEffect(() => {
+    if (message) {
+      setError(message);
+    }
+  }, [message]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

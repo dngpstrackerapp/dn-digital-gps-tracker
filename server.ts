@@ -24,8 +24,12 @@ import {
   deleteTripReport,
   seedDatabaseIfEmpty,
   auth,
-  loginWithFirebaseAuth
+  loginWithFirebaseAuth,
+  getFirebaseConfig,
+  registerDriver,
+  deleteDriverTransaction
 } from './src/lib/firebaseService.js';
+import { isDriverOnline, getActiveReports } from './src/lib/statusHelper.js';
 
 // Express setup
 const app = express();
@@ -72,6 +76,11 @@ const resolvedDirname = typeof import.meta !== 'undefined' && import.meta.url
 // ==========================================
 // API ENDPOINTS (POWERED BY FIRESTORE)
 // ==========================================
+
+// GET: Client configuration for Firebase real-time listeners
+app.get('/api/config/firebase', (req, res) => {
+  return res.json(getFirebaseConfig());
+});
 
 // Auth: Login / Only Sign-In is allowed publicly
 app.post('/api/auth/login', async (req, res) => {
@@ -144,12 +153,41 @@ app.get('/api/drivers', async (req, res) => {
   try {
     const driversList = await getDrivers();
     const reports = await getTripReports();
-    const activeDriverIds = new Set(
-      reports.filter(r => r.status === 'ongoing').map(r => r.driverId)
-    );
+    const usersList = await getUsers();
+
+    // Create a map of user ID (UID) -> email
+    const userEmailMap = new Map<string, string>();
+    usersList.forEach(u => {
+      if (u.email) {
+        userEmailMap.set(u.id, u.email.toLowerCase());
+      }
+    });
 
     const updatedDrivers = driversList.map(driver => {
-      const isOngoing = activeDriverIds.has(driver.id);
+      // 1. Direct match by driver.id
+      let isOngoing = isDriverOnline(reports, driver.id);
+
+      // 2. Fallback: match by email (if IDs are different)
+      if (!isOngoing && driver.email) {
+        const driverEmailLower = driver.email.toLowerCase();
+        isOngoing = reports.some(r => {
+          const reportUserEmail = userEmailMap.get(r.driverId);
+          return (reportUserEmail === driverEmailLower || (r.driverId && r.driverId.toLowerCase() === driverEmailLower)) &&
+                 r.status === 'ongoing' &&
+                 (r.endTime === null || r.endTime === undefined || !r.endTime);
+        });
+      }
+
+      // 3. Fallback: match by name
+      if (!isOngoing && driver.name) {
+        const driverNameLower = driver.name.toLowerCase();
+        isOngoing = reports.some(r => {
+          return r.driverName && r.driverName.toLowerCase() === driverNameLower &&
+                 r.status === 'ongoing' &&
+                 (r.endTime === null || r.endTime === undefined || !r.endTime);
+        });
+      }
+
       return {
         ...driver,
         status: (isOngoing ? 'active' : 'offline') as 'active' | 'offline'
@@ -177,8 +215,7 @@ app.post('/api/drivers', async (req, res) => {
     vehicleNameType, 
     licenseNumber, 
     licenseExpiry, 
-    emergencyContact,
-    status // Status (Active / Inactive)
+    emergencyContact
   } = req.body;
 
   if (!id || !name || !phone || !email || !password || !vehiclePlate) {
@@ -186,13 +223,6 @@ app.post('/api/drivers', async (req, res) => {
   }
 
   try {
-    // Check if driver or user ID already exists
-    const existingDriver = await getDriver(id);
-    const existingUser = await getUser(id);
-    if (existingDriver || existingUser) {
-      return res.status(400).json({ error: 'A driver with this Driver ID already exists.' });
-    }
-
     const existingUserByEmail = await getUserByEmail(email);
     if (existingUserByEmail) {
       return res.status(400).json({ error: 'A user with this Email Address already exists.' });
@@ -200,8 +230,8 @@ app.post('/api/drivers', async (req, res) => {
 
     const companyName = 'DN GPS Tracker';
 
-    const newDriver = {
-      id,
+    const driverDoc = await registerDriver({
+      id, // This custom driver code (like D101) will be saved as driverCode
       name,
       dob: dob || '',
       phone,
@@ -213,30 +243,15 @@ app.post('/api/drivers', async (req, res) => {
       licenseNumber: licenseNumber || '',
       licenseExpiry: licenseExpiry || '',
       emergencyContact: emergencyContact || '',
-      companyName,
-      status: 'offline' as const,
-      lastLatitude: null,
-      lastLongitude: null,
-      lastActive: null
-    };
-
-    await saveDriver(newDriver);
-
-    // Create the linked user so they can login
-    await saveUser({
-      id,
-      email: email.toLowerCase(),
-      password,
-      name,
-      role: 'driver',
-      phone,
-      vehiclePlate,
-      createdAt: new Date().toISOString()
+      companyName
     });
 
-    return res.status(201).json(newDriver);
+    return res.status(201).json(driverDoc);
   } catch (error: any) {
     console.error('Error creating driver:', error);
+    if (error.code === 'auth/email-already-in-use') {
+      return res.status(400).json({ error: 'A Firebase Auth user with this Email Address already exists.' });
+    }
     return res.status(500).json({ error: 'Failed to create driver: ' + error.message });
   }
 });
@@ -311,14 +326,12 @@ app.delete('/api/drivers/:id', async (req, res) => {
   
   try {
     const driver = await getDriver(id);
-    if (!driver) {
+    const user = await getUser(id);
+    if (!driver && !user) {
       return res.status(404).json({ error: 'Driver not found' });
     }
 
-    await deleteDriver(id);
-    await deleteUser(id);
-    await deleteLocationLogsForDriver(id);
-    await deleteTripReportsForDriver(id);
+    await deleteDriverTransaction(id);
 
     return res.json({ success: true, message: 'Driver deleted successfully' });
   } catch (error) {

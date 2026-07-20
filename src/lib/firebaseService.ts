@@ -51,6 +51,16 @@ export const storage = getStorage(firebaseApp);
 // Initialize Firestore with custom database ID if available
 export const db = getFirestore(firebaseApp, config.firestoreDatabaseId || '(default)');
 
+export function getFirebaseConfig() {
+  return {
+    apiKey: config.apiKey,
+    authDomain: config.authDomain,
+    projectId: config.projectId,
+    storageBucket: config.storageBucket,
+    firestoreDatabaseId: config.firestoreDatabaseId
+  };
+}
+
 // Tracks admin UIDs discovered during seeding or login so they can be mapped to the single admin profile
 const adminUids = new Set<string>();
 
@@ -193,6 +203,21 @@ export async function getDriver(id: string): Promise<Driver | null> {
     return null;
   } catch (error) {
     console.error(`Error in getDriver(${id}):`, error);
+    return null;
+  }
+}
+
+export async function getDriverByEmail(email: string): Promise<Driver | null> {
+  try {
+    const colRef = collection(db, 'drivers');
+    const q = query(colRef, where('email', '==', email.toLowerCase()));
+    const querySnapshot = await getDocs(q);
+    if (!querySnapshot.empty) {
+      return querySnapshot.docs[0].data() as Driver;
+    }
+    return null;
+  } catch (error) {
+    console.error(`Error in getDriverByEmail(${email}):`, error);
     return null;
   }
 }
@@ -472,6 +497,11 @@ export async function loginWithFirebaseAuth(email: string, password: string): Pr
     if (password === 'admin' || password === 'admin123') {
       authPassword = 'admin123';
     }
+  } else {
+    // For non-admin (driver) users, if password is < 6 chars, append '123' as in registerDriver
+    if (password.length < 6) {
+      authPassword = password + '123';
+    }
   }
 
   try {
@@ -488,67 +518,183 @@ export async function loginWithFirebaseAuth(email: string, password: string): Pr
       }
     }
 
+    // Load user profile from users collection using UID
     let user = await getUser(authUser.uid);
     if (!user) {
-      user = await getUserByEmail(lowercaseEmail);
-      if (user) {
-        console.log(`[Firebase Service] ID mismatch. Migrating Firestore user doc to UID: ${authUser.uid}`);
-        const oldId = user.id;
-        user.id = authUser.uid;
-        await saveUser(user);
-        await deleteUser(oldId);
-      } else {
-        user = {
-          id: authUser.uid,
-          email: lowercaseEmail,
-          name: lowercaseEmail.split('@')[0],
-          role: 'driver',
-          phone: '',
-          vehiclePlate: '',
-          createdAt: new Date().toISOString()
-        };
-        await saveUser(user);
-      }
+      console.warn(`[Firebase Service] Firestore profile missing for signed-in Auth user ${lowercaseEmail}. Recreating default driver profile on-the-fly...`);
+      const defaultCode = 'D' + Math.floor(100 + Math.random() * 900);
+      const defaultName = lowercaseEmail.split('@')[0];
+      
+      // Recreate user document
+      user = {
+        id: authUser.uid,
+        driverCode: defaultCode,
+        email: lowercaseEmail,
+        password: authPassword,
+        name: defaultName,
+        role: 'driver',
+        phone: '555-0199',
+        vehiclePlate: 'TX-999-TEMP',
+        createdAt: new Date().toISOString()
+      };
+      await saveUser(user);
+
+      // Recreate driver document
+      const driverDoc: Driver = {
+        id: authUser.uid,
+        driverCode: defaultCode,
+        name: defaultName,
+        email: lowercaseEmail,
+        password: authPassword,
+        phone: '555-0199',
+        vehiclePlate: 'TX-999-TEMP',
+        vehicleNameType: 'Standard Vehicle',
+        companyName: 'DN GPS Tracker',
+        status: 'offline',
+        lastLatitude: null,
+        lastLongitude: null,
+        lastActive: null
+      };
+      await saveDriver(driverDoc);
     }
+
     return user;
   } catch (authError: any) {
-    if (authError.code === 'auth/user-not-found' || authError.code === 'auth/invalid-credential') {
-      console.log(`[Firebase Service] User ${lowercaseEmail} not found or invalid credential in Auth. Trying Firestore fallback...`);
-      const dbUser = await getUserByEmail(lowercaseEmail);
-      if (dbUser && dbUser.password === password) {
-        try {
-          console.log(`[Firebase Service] Matching legacy password found. Creating Auth account on-the-fly...`);
-          // Ensure password is at least 6 characters for Firebase Auth (Firebase policy)
-          const securePassword = password.length < 6 ? password + '123' : password;
-          const credential = await createUserWithEmailAndPassword(auth, lowercaseEmail, securePassword);
-          const newUid = credential.user.uid;
-          
-          if (isSystemAdminEmail(lowercaseEmail)) {
-            adminUids.add(newUid);
-            const adminProfile = await getUser('admin_profile');
-            if (adminProfile) {
-              return adminProfile;
-            }
-          }
+    console.error(`[Firebase Service] Authentication error for ${lowercaseEmail}:`, authError.message);
+    
+    // Check if there is a Firestore fallback for correct password matching
+    const dbUser = await getUserByEmail(lowercaseEmail);
+    if (dbUser && (dbUser.password === password || (password.length < 6 && dbUser.password === password + '123') || dbUser.password === authPassword)) {
+      console.log(`[Firebase Service] Password matched Firestore user document for ${lowercaseEmail}. Allowing login via Firestore fallback.`);
+      return dbUser;
+    }
 
-          const oldId = dbUser.id;
-          dbUser.id = newUid;
-          await saveUser(dbUser);
-          await deleteUser(oldId);
-          
-          console.log(`[Firebase Service] On-the-fly registration succeeded. UID: ${newUid}`);
-          return dbUser;
-        } catch (regError: any) {
-          if (regError.code === 'auth/email-already-in-use') {
-            console.log(`[Firebase Service] Auth user already exists. Returning dbUser.`);
-            return dbUser;
-          }
-          console.error('[Firebase Service] On-the-fly registration failed:', regError);
-          return dbUser;
-        }
-      }
+    if (authError.code === 'auth/user-not-found' || authError.code === 'auth/invalid-credential' || authError.code === 'auth/wrong-password') {
+      throw new Error('Invalid email or password.');
     }
     throw authError;
   }
+}
+
+export async function registerDriver(driverData: any): Promise<any> {
+  const lowercaseEmail = driverData.email.toLowerCase();
+  
+  console.log(`[Firebase Service] Registering driver with Email: ${lowercaseEmail}`);
+  
+  let uid: string;
+  try {
+    // 1. Create Firebase Auth account first
+    const securePassword = driverData.password.length < 6 ? driverData.password + '123' : driverData.password;
+    const userCredential = await createUserWithEmailAndPassword(auth, lowercaseEmail, securePassword);
+    uid = userCredential.user.uid;
+    console.log(`[Firebase Service] Created Auth user with UID: ${uid}`);
+  } catch (err: any) {
+    if (err.code === 'auth/email-already-in-use') {
+      console.warn(`[Firebase Service] Auth account already exists for ${lowercaseEmail}. Reusing or generating custom deterministic UID.`);
+      uid = 'uid_' + lowercaseEmail.replace(/[^a-zA-Z0-9]/g, '_');
+    } else {
+      throw err;
+    }
+  }
+
+  // 2. Prepare driver document with uid as primary key, storing the custom ID in driverCode
+  const driverDoc = {
+    ...driverData,
+    id: uid, // Use Auth UID or generated ID as the standard ID
+    driverCode: driverData.id, // Save custom ID as driverCode
+    email: lowercaseEmail,
+    status: 'offline' as const,
+    lastLatitude: null,
+    lastLongitude: null,
+    lastActive: null
+  };
+  await saveDriver(driverDoc);
+
+  // 3. Prepare linked user document
+  const userProfile: UserProfile = {
+    id: uid, // Use Auth UID or generated ID as the standard ID
+    driverCode: driverData.id, // Save custom ID as driverCode
+    email: lowercaseEmail,
+    password: driverData.password,
+    name: driverData.name,
+    role: 'driver',
+    phone: driverData.phone,
+    vehiclePlate: driverData.vehiclePlate,
+    createdAt: new Date().toISOString()
+  };
+  await saveUser(userProfile);
+
+  return driverDoc;
+}
+
+export async function deleteDriverTransaction(driverId: string): Promise<void> {
+  console.log(`[Firebase Service] Starting complete transactional deletion for driver ID: ${driverId}`);
+  
+  // 1. Get driver profile to retrieve email and password for Auth deletion
+  const driver = await getDriver(driverId);
+  const user = await getUser(driverId);
+  
+  const email = driver?.email || user?.email;
+  const password = driver?.password || user?.password;
+
+  // 2. End any active trip reports for this driver (close/complete them instead of leaving ongoing or orphan)
+  try {
+    const colRef = collection(db, 'tripReports');
+    const q = query(colRef, where('driverId', '==', driverId), where('status', '==', 'ongoing'));
+    const snapshot = await getDocs(q);
+    for (const docSnap of snapshot.docs) {
+      await setDoc(doc(db, 'tripReports', docSnap.id), {
+        status: 'completed',
+        endTime: new Date().toISOString(),
+        endLocation: 'Shift Completed via Admin Deletion'
+      }, { merge: true });
+    }
+    console.log(`[Firebase Service] Successfully closed ongoing trip reports for ${driverId}.`);
+  } catch (err) {
+    console.error(`[Firebase Service] Error closing ongoing trip reports for ${driverId}:`, err);
+  }
+
+  // 3. Delete live GPS records / location logs
+  try {
+    await deleteLocationLogsForDriver(driverId);
+    console.log(`[Firebase Service] Deleted location logs for ${driverId}.`);
+  } catch (err) {
+    console.error(`[Firebase Service] Error deleting location logs for ${driverId}:`, err);
+  }
+
+  // 4. Delete Firestore documents (drivers and users)
+  try {
+    const driverRef = doc(db, 'drivers', driverId);
+    await deleteDoc(driverRef);
+    console.log(`[Firebase Service] Deleted drivers/${driverId} document.`);
+  } catch (err) {
+    console.error(`[Firebase Service] Error deleting drivers document for ${driverId}:`, err);
+  }
+
+  try {
+    const userRef = doc(db, 'users', driverId);
+    await deleteDoc(userRef);
+    console.log(`[Firebase Service] Deleted users/${driverId} document.`);
+  } catch (err) {
+    console.error(`[Firebase Service] Error deleting users document for ${driverId}:`, err);
+  }
+
+  // 5. Delete Firebase Auth account
+  if (email && password) {
+    try {
+      console.log(`[Firebase Service] Attempting to delete Auth account for ${email} using login credentials...`);
+      const credential = await signInWithEmailAndPassword(auth, email.toLowerCase(), password);
+      if (credential.user) {
+        await credential.user.delete();
+        console.log(`[Firebase Service] Successfully deleted Firebase Auth account for ${email}.`);
+      }
+    } catch (authErr: any) {
+      console.warn(`[Firebase Service] Warning: Auth deletion failed or account was not present:`, authErr.message);
+    }
+  } else {
+    console.warn(`[Firebase Service] Email or password not found for ${driverId}. Skipping Auth account deletion.`);
+  }
+
+  console.log(`[Firebase Service] Transactional deletion completed for ${driverId}.`);
 }
 

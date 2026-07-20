@@ -9,6 +9,7 @@ export interface UserProfile {
   vehiclePlate?: string;
   password?: string;
   createdAt: string;
+  driverCode?: string;
 }
 
 export interface Driver {
@@ -20,6 +21,7 @@ export interface Driver {
   lastLatitude: number | null;
   lastLongitude: number | null;
   lastActive: string | null;
+  driverCode?: string;
   
   // New Admin Driver fields
   dob?: string;

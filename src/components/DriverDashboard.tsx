@@ -6,14 +6,16 @@ import {
 } from 'lucide-react';
 import { UserProfile, TripReport } from '../types';
 import { fetchApi } from '../lib/api';
+import { subscribeToUserProfile } from '../lib/firebaseClient';
 
 interface DriverDashboardProps {
   user: UserProfile;
   onLogout: () => void;
+  onForceLogout?: (msg?: string) => void;
   onProfileUpdate?: (updatedUser: UserProfile) => void;
 }
 
-export default function DriverDashboard({ user, onLogout, onProfileUpdate }: DriverDashboardProps) {
+export default function DriverDashboard({ user, onLogout, onForceLogout, onProfileUpdate }: DriverDashboardProps) {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'location' | 'summary' | 'profile'>('dashboard');
   const [isShiftActive, setIsShiftActive] = useState(false);
   const [activeTrip, setActiveTrip] = useState<TripReport | null>(null);
@@ -74,13 +76,30 @@ export default function DriverDashboard({ user, onLogout, onProfileUpdate }: Dri
           setProfileName(freshData.name || '');
           setProfilePhone(freshData.phone || '');
           setProfilePlate(freshData.vehiclePlate || '');
+        } else if (res.status === 404) {
+          if (onForceLogout) {
+            onForceLogout("Your account has been removed by the administrator.");
+          }
         }
       } catch (err) {
         console.error('Failed to sync profile from Firestore:', err);
       }
     };
     syncProfileFromFirestore();
-  }, [user.id]);
+  }, [user.id, onForceLogout]);
+
+  // Listen in real-time if the driver account was deleted by the admin
+  useEffect(() => {
+    const unsubscribe = subscribeToUserProfile(user.id, (userProfile) => {
+      if (userProfile === null) {
+        console.warn(`[DriverDashboard] Account for ${user.id} was deleted. Forcing logout.`);
+        if (onForceLogout) {
+          onForceLogout("Your account has been removed by the administrator.");
+        }
+      }
+    });
+    return () => unsubscribe();
+  }, [user.id, onForceLogout]);
 
   // Log transmitter log helper
   const addLog = (message: string) => {
