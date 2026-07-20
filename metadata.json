@@ -1,0 +1,6 @@
+{
+  "name": "DN GPS Tracker",
+  "description": "Premium real-time GPS tracking mobile application with admin and driver dashboards.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

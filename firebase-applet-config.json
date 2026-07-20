@@ -1,0 +1,12 @@
+{
+  "projectId": "dn-gps-tracker",
+  "appId": "1:164396609620:web:5c2e6fcbe4dd336c7e3dc1",
+  "apiKey": "AIzaSyBasnhkaEGJhsgieztAYXkc-l3CGzAnGjQ",
+  "authDomain": "dn-gps-tracker.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-dngpstracker-30811a9d-2239-420c-a8a2-fe2e9be838ef",
+  "storageBucket": "dn-gps-tracker.firebasestorage.app",
+  "messagingSenderId": "164396609620",
+  "measurementId": "",
+  "oAuthClientId": "164396609620-li7j9hd3t4rk4dg2feu6gdcrrr713ouv.apps.googleusercontent.com",
+  "recaptchaSiteKey": ""
+}

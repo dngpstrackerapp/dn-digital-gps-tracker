@@ -1,0 +1,87 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User account schema for auth and profile tracking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "password": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string" },
+        "phone": { "type": "string" },
+        "vehiclePlate": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "email", "password", "role"]
+    },
+    "Driver": {
+      "title": "Driver",
+      "description": "Real-time driver location and telemetry tracking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "vehiclePlate": { "type": "string" },
+        "phone": { "type": "string" },
+        "status": { "type": "string" },
+        "lastLatitude": { "type": "number" },
+        "lastLongitude": { "type": "number" },
+        "lastActive": { "type": "string" }
+      },
+      "required": ["id", "name", "vehiclePlate"]
+    },
+    "LocationLog": {
+      "title": "LocationLog",
+      "description": "Historical GPS location coordinate stream logs",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "driverId": { "type": "string" },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "speed": { "type": "number" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "driverId", "latitude", "longitude", "timestamp"]
+    },
+    "TripReport": {
+      "title": "TripReport",
+      "description": "Daily or shift-based trip/shift reports logged by drivers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "driverId": { "type": "string" },
+        "driverName": { "type": "string" },
+        "vehiclePlate": { "type": "string" },
+        "date": { "type": "string" },
+        "startTime": { "type": "string" },
+        "endTime": { "type": "string" },
+        "startLocation": { "type": "string" },
+        "endLocation": { "type": "string" },
+        "distanceKm": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "driverId", "driverName", "startTime", "status"]
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": "User",
+      "description": "Users stored by user/driver ID"
+    },
+    "drivers/{driverId}": {
+      "schema": "Driver",
+      "description": "Drivers stored by driver ID"
+    },
+    "locationLogs/{logId}": {
+      "schema": "LocationLog",
+      "description": "Real-time location breadcrumbs for telemetry"
+    },
+    "tripReports/{reportId}": {
+      "schema": "TripReport",
+      "description": "Shifts and completed trip statistics"
+    }
+  }
+}
